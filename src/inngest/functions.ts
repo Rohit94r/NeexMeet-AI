@@ -1,6 +1,6 @@
 import { eq, inArray } from "drizzle-orm";
 import JSONL from "jsonl-parse-stringify";
-import { createAgent, openai, TextMessage } from "@inngest/agent-kit";
+import OpenAI from "openai";
 
 import { db } from "@/db";
 import { agents, meetings, user } from "@/db/schema";
@@ -8,9 +8,12 @@ import { inngest } from "@/inngest/client";
 
 import { StreamTranscriptItem } from "@/modules/meetings/types";
 
-const summarizer = createAgent({
-  name: "summarizer",
-  system: `
+const openaiClient = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY!,
+  baseURL: "https://api.groq.com/openai/v1"
+});
+
+const systemPrompt = `
     You are an expert summarizer. You write readable, concise, simple content. You are given a transcript of a meeting and you need to summarize it.
 
 Use the following markdown structure for every output:
@@ -30,9 +33,7 @@ Example:
 #### Next Section
 - Feature X automatically does Y
 - Mention of integration with Z
-  `.trim(),
-  model: openai({ model: "gpt-4o", apiKey: process.env.OPENAI_API_KEY }),
-});
+`;
 
 export const meetingsProcessing = inngest.createFunction(
   { id: "meetings/processing" },
@@ -96,16 +97,22 @@ export const meetingsProcessing = inngest.createFunction(
       });
     });
 
-    const { output } = await summarizer.run(
-      "Summarize the following transcript: " +
-        JSON.stringify(transcriptWithSpeakers)
-    );
+    const output = await step.run("summarize-transcript", async () => {
+      const gptResponse = await openaiClient.chat.completions.create({
+        model: "llama-3.1-8b-instant",
+        messages: [
+          { role: "system", content: systemPrompt.trim() },
+          { role: "user", content: "Summarize the following transcript: " + JSON.stringify(transcriptWithSpeakers) }
+        ]
+      });
+      return gptResponse.choices[0].message.content || "Summary could not be generated.";
+    });
 
     await step.run("save-summary", async () => {
       await db
         .update(meetings)
         .set({
-          summary: (output[0] as TextMessage).content as string,
+          summary: output,
           status: "completed",
         })
         .where(eq(meetings.id, event.data.meetingId))
